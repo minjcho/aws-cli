@@ -15,7 +15,13 @@ from awscli.testutils import unittest
 import platform
 
 from awscli.customizations.s3.filegenerator import FileStat
-from awscli.customizations.s3.filters import Filter, create_filter
+from awscli.customizations.s3.filters import (
+    Filter,
+    _literal_prefix,
+    _pattern_can_match_under,
+    _pattern_matches_all_under,
+    create_filter,
+)
 
 
 def platform_path(filepath):
@@ -222,6 +228,193 @@ class FiltersTest(unittest.TestCase):
         self.assertEqual(len(filtered), 2)
         for filtered_file in filtered:
             self.assertFalse('.txt' in filtered_file.src)
+
+class LiteralPrefixTest(unittest.TestCase):
+    def test_no_metacharacters_returns_full_pattern(self):
+        self.assertEqual(_literal_prefix('foo/bar.txt'), 'foo/bar.txt')
+
+    def test_stops_at_star(self):
+        self.assertEqual(_literal_prefix('foo/*'), 'foo/')
+
+    def test_stops_at_question_mark(self):
+        self.assertEqual(_literal_prefix('foo/?bar'), 'foo/')
+
+    def test_stops_at_bracket(self):
+        self.assertEqual(_literal_prefix('foo/[abc]'), 'foo/')
+
+    def test_starts_with_metacharacter(self):
+        self.assertEqual(_literal_prefix('*.py'), '')
+
+
+class PatternCanMatchUnderTest(unittest.TestCase):
+    def test_glob_metachar_pattern_can_match_anywhere(self):
+        self.assertTrue(_pattern_can_match_under('*.py', 'root/foo/'))
+
+    def test_pattern_with_target_as_prefix_can_match(self):
+        # pattern's literal prefix == target → pattern continues with *
+        self.assertTrue(
+            _pattern_can_match_under('root/excluded/*', 'root/excluded/'))
+
+    def test_pattern_more_specific_than_target_still_matches(self):
+        # target is a prefix of the pattern's literal prefix
+        self.assertTrue(
+            _pattern_can_match_under(
+                'root/excluded/included/*', 'root/excluded/'))
+
+    def test_diverging_literals_cannot_match(self):
+        self.assertFalse(
+            _pattern_can_match_under('root/excluded/*', 'root/other/'))
+
+    def test_literal_only_pattern_shorter_than_target_cannot_match(self):
+        # pattern has no metachars and is shorter than target → it can only
+        # match its exact string, which sits at depth less than the target.
+        self.assertFalse(
+            _pattern_can_match_under('root/excluded', 'root/excluded/'))
+
+    def test_literal_only_pattern_under_target_can_match(self):
+        # pattern is purely literal and sits under target depth.
+        self.assertTrue(
+            _pattern_can_match_under('root/foo', 'root/'))
+
+
+class PatternMatchesAllUnderTest(unittest.TestCase):
+    def test_star_only_matches_everything(self):
+        self.assertTrue(_pattern_matches_all_under('*', 'anything/'))
+
+    def test_target_star_matches_all_descendants(self):
+        self.assertTrue(
+            _pattern_matches_all_under('root/excluded/*', 'root/excluded/'))
+
+    def test_double_star_treated_as_star(self):
+        # fnmatch treats '**' as just '*' since '*' already crosses '/'.
+        self.assertTrue(
+            _pattern_matches_all_under('root/excluded/**', 'root/excluded/'))
+
+    def test_higher_pattern_with_wildcard_covers_descendants(self):
+        # 'root/*' matches 'root/foo/anything' too.
+        self.assertTrue(
+            _pattern_matches_all_under('root/*', 'root/foo/'))
+
+    def test_partial_pattern_does_not_cover(self):
+        # '*.tmp' doesn't match every descendant of root/foo/.
+        self.assertFalse(
+            _pattern_matches_all_under('root/*.tmp', 'root/foo/'))
+
+    def test_literal_only_pattern_does_not_cover(self):
+        self.assertFalse(
+            _pattern_matches_all_under('root/foo', 'root/foo/'))
+
+    def test_diverging_literal_does_not_cover(self):
+        self.assertFalse(
+            _pattern_matches_all_under('root/excluded/*', 'root/other/'))
+
+
+class CanSkipDirectoryTest(unittest.TestCase):
+    """Verifies the §2.5 case table from proposals/s3-filter-prune.md."""
+
+    def _make_filter(self, raw_filters, rootdir=None):
+        if rootdir is None:
+            rootdir = platform_path('/root')
+        normalized = [(action.lstrip('-'), pat) for action, pat in raw_filters]
+        return Filter(normalized, rootdir, rootdir)
+
+    def _path_under(self, *parts, rootdir=None):
+        if rootdir is None:
+            rootdir = platform_path('/root')
+        return os.path.join(rootdir, *parts)
+
+    def test_no_filters_never_skips(self):
+        f = Filter({}, None, None)
+        self.assertFalse(f.can_skip_directory(self._path_under('anything')))
+
+    # Case #1: --exclude 'src/*' against directory 'src'
+    def test_simple_exclude_skips_matching_directory(self):
+        f = self._make_filter([('--exclude', 'src/*')])
+        self.assertTrue(f.can_skip_directory(self._path_under('src')))
+
+    # Case #2: --exclude '*' against any descendant
+    def test_exclude_star_skips_all_descendants(self):
+        f = self._make_filter([('--exclude', '*')])
+        self.assertTrue(
+            f.can_skip_directory(self._path_under('foo', 'bar')))
+
+    # Case #3: --exclude '*' --include '*.py' (PR #5425 regression)
+    def test_kyleknap_regression_does_not_skip(self):
+        """The case that killed PR #5425 must not regress here."""
+        f = self._make_filter([
+            ('--exclude', '*'),
+            ('--include', '*.py'),
+        ])
+        self.assertFalse(f.can_skip_directory(self._path_under('foo')))
+        self.assertFalse(
+            f.can_skip_directory(self._path_under('foo', 'bar')))
+
+    # Case #4: --exclude 'sub/*' --include 'sub/included/*' against 'sub'
+    def test_include_under_excluded_subtree_blocks_skip(self):
+        f = self._make_filter([
+            ('--exclude', 'sub/*'),
+            ('--include', 'sub/included/*'),
+        ])
+        self.assertFalse(f.can_skip_directory(self._path_under('sub')))
+
+    # Case #5: same filters, but directory is sub/other (not under include)
+    def test_sibling_subtree_under_exclude_is_skipped(self):
+        f = self._make_filter([
+            ('--exclude', 'src/*'),
+            ('--include', 'src/included/*'),
+        ])
+        self.assertTrue(
+            f.can_skip_directory(self._path_under('src', 'other')))
+
+    # Case #6: same filters, directory is sub/included (must traverse)
+    def test_included_subtree_traversed(self):
+        f = self._make_filter([
+            ('--exclude', 'src/*'),
+            ('--include', 'src/included/*'),
+        ])
+        self.assertFalse(
+            f.can_skip_directory(self._path_under('src', 'included')))
+
+    # Case #7: --exclude '*.tmp' (partial pattern, can't prove coverage)
+    def test_partial_pattern_does_not_skip(self):
+        f = self._make_filter([('--exclude', '*.tmp')])
+        self.assertFalse(f.can_skip_directory(self._path_under('foo')))
+
+    # Case #8: --exclude 'foo' (literal, matches dir itself not descendants)
+    def test_literal_pattern_does_not_skip_descendants(self):
+        f = self._make_filter([('--exclude', 'foo')])
+        self.assertFalse(f.can_skip_directory(self._path_under('foo')))
+
+    def test_s3_separator_exclude(self):
+        # On S3 listings, separators are '/' regardless of host OS.
+        rootdir = 'bucket'
+        f = Filter([('exclude', 'logs/*')], rootdir, rootdir)
+        self.assertTrue(
+            f.can_skip_directory('bucket/logs', src_type='s3'))
+        self.assertFalse(
+            f.can_skip_directory('bucket/keep', src_type='s3'))
+
+    def test_three_filter_alternating_stack(self):
+        # Mirrors test_pattern_order_last_match_wins in functional tests.
+        f = self._make_filter([
+            ('--exclude', 'excluded/*'),
+            ('--include', 'excluded/included/*'),
+            ('--exclude', 'included/excluded/*'),
+        ])
+        # excluded/ must be traversed because included/* could match
+        # something inside.
+        self.assertFalse(
+            f.can_skip_directory(self._path_under('excluded')))
+        # included/excluded/ is fully covered by the third pattern.
+        self.assertTrue(
+            f.can_skip_directory(
+                self._path_under('included', 'excluded')))
+        # included/ has no exclude that covers it, no include that
+        # demands traversal — but step 2 fails (no exclude covers it),
+        # so default is "must traverse". (Files there are default-include.)
+        self.assertFalse(
+            f.can_skip_directory(self._path_under('included')))
+
 
 if __name__ == "__main__":
     unittest.main()
