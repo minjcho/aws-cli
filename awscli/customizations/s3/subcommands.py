@@ -1145,17 +1145,25 @@ class CommandArchitecture(object):
                     out_file=sys.stderr
                 )
 
+        # Build the user's --include/--exclude filter once and share the
+        # same instance with both the file generator (for early prune /
+        # pre-filter) and the post-walk filter stage. Sharing avoids two
+        # separate compilations of the same patterns and lets the walker
+        # skip excluded directories entirely (fixes #1117 and #1138).
+        file_filter = create_filter(self.parameters)
         fgen_kwargs = {
             'client': self._source_client, 'operation_name': operation_name,
             'follow_symlinks': self.parameters['follow_symlinks'],
             'page_size': self.parameters['page_size'],
             'result_queue': result_queue,
+            'file_filter': file_filter,
         }
         rgen_kwargs = {
             'client': self._client, 'operation_name': '',
             'follow_symlinks': self.parameters['follow_symlinks'],
             'page_size': self.parameters['page_size'],
             'result_queue': result_queue,
+            'file_filter': file_filter,
         }
 
         fgen_request_parameters = \
@@ -1194,8 +1202,7 @@ class CommandArchitecture(object):
             command_dict = {'setup': [files, rev_files],
                             'file_generator': [file_generator,
                                                rev_generator],
-                            'filters': [create_filter(self.parameters),
-                                        create_filter(self.parameters)],
+                            'filters': [file_filter, file_filter],
                             'comparator': [Comparator(**sync_strategies)],
                             'file_info_builder': [file_info_builder],
                             's3_handler': [s3_transfer_handler]}
@@ -1205,7 +1212,7 @@ class CommandArchitecture(object):
         elif self.cmd == 'cp':
             command_dict = {'setup': [files],
                             'file_generator': [file_generator],
-                            'filters': [create_filter(self.parameters)],
+                            'filters': [file_filter],
                             'file_info_builder': [file_info_builder],
                             's3_handler': [s3_transfer_handler]}
             if self._should_handle_case_conflicts():
@@ -1217,13 +1224,13 @@ class CommandArchitecture(object):
         elif self.cmd == 'rm':
             command_dict = {'setup': [files],
                             'file_generator': [file_generator],
-                            'filters': [create_filter(self.parameters)],
+                            'filters': [file_filter],
                             'file_info_builder': [file_info_builder],
                             's3_handler': [s3_transfer_handler]}
         elif self.cmd == 'mv':
             command_dict = {'setup': [files],
                             'file_generator': [file_generator],
-                            'filters': [create_filter(self.parameters)],
+                            'filters': [file_filter],
                             'file_info_builder': [file_info_builder],
                             's3_handler': [s3_transfer_handler]}
             if self._should_handle_case_conflicts():

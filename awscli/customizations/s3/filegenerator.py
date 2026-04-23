@@ -18,6 +18,7 @@ from dateutil.parser import parse
 from dateutil.tz import tzlocal
 from botocore.exceptions import ClientError
 
+from awscli.customizations.s3.fileinfo import FileInfo
 from awscli.customizations.s3.utils import find_bucket_key, get_file_stat
 from awscli.customizations.s3.utils import BucketLister, create_warning, \
     find_dest_path_comp_key, EPOCH_TIME
@@ -119,7 +120,8 @@ class FileGenerator(object):
     ``FileInfo`` objects to send to a ``Comparator`` or ``S3Handler``.
     """
     def __init__(self, client, operation_name, follow_symlinks=True,
-                 page_size=None, result_queue=None, request_parameters=None):
+                 page_size=None, result_queue=None, request_parameters=None,
+                 file_filter=None):
         self._client = client
         self.operation_name = operation_name
         self.follow_symlinks = follow_symlinks
@@ -130,6 +132,7 @@ class FileGenerator(object):
         self.request_parameters = {}
         if request_parameters is not None:
             self.request_parameters = request_parameters
+        self.file_filter = file_filter
 
     def call(self, files):
         """
@@ -202,6 +205,14 @@ class FileGenerator(object):
                 for name in names:
                     file_path = join(path, name)
                     if isdir(file_path):
+                        # If the user's filter chain makes it impossible
+                        # for any descendant to be included, prune the
+                        # whole subtree instead of recursing into it.
+                        # This is what fixes aws/aws-cli#1138.
+                        if self.file_filter is not None and \
+                                self.file_filter.can_skip_directory(
+                                    file_path, 'local'):
+                            continue
                         # Anything in a directory will have a prefix of
                         # this current directory and will come before the
                         # remaining contents in this directory.  This
@@ -275,6 +286,32 @@ class FileGenerator(object):
                 path = path[:-1]
             if os.path.islink(path):
                 return True
+        if self.file_filter is not None:
+            # Pre-filter using the user's --include/--exclude rules so the
+            # walker does not stat / listdir entries that the filter chain
+            # is going to drop anyway.
+            #
+            # * For directories: ask Filter.can_skip_directory whether any
+            #   descendant could possibly be included. This must run before
+            #   triggers_warning() because is_readable() unconditionally
+            #   calls os.listdir() on directories — without this guard,
+            #   excluded subtrees would be listed just to check readability
+            #   (defeats the entire #1138 fix).
+            # * For files: ask Filter.call. This is what fixes #1117 — a
+            #   FIFO/socket/0o000 file inside an excluded subtree should
+            #   not produce a warning because it would not be transferred
+            #   anyway.
+            #
+            # Note: passing the rootdir through can_skip_directory is safe;
+            # only descendants matched by an exclude that covers everything
+            # under them get pruned, never the rootdir itself.
+            if os.path.isdir(path):
+                if self.file_filter.can_skip_directory(path, 'local'):
+                    return True
+            else:
+                probe = FileInfo(src=path, src_type='local')
+                if not list(self.file_filter.call([probe])):
+                    return True
         warning_triggered = self.triggers_warning(path)
         if warning_triggered:
             return True
