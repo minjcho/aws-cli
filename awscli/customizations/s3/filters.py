@@ -73,12 +73,9 @@ def _get_local_root(source_location, dir_op):
     return rootdir
 
 
-_GLOB_METACHARS = frozenset('*?[')
-
-
 def _literal_prefix(pattern):
     for i, ch in enumerate(pattern):
-        if ch in _GLOB_METACHARS:
+        if ch in '*?[':
             return pattern[:i]
     return pattern
 
@@ -207,10 +204,17 @@ class Filter(object):
             return False
         sep = os.sep if src_type == 'local' else '/'
         target = dir_path.rstrip(sep) + sep
+        if src_type == 'local':
+            # ``fnmatch.fnmatch`` (used by ``_match_pattern``) normalizes
+            # case via ``os.path.normcase`` on Windows, so this prefix
+            # comparison must do the same — otherwise a case-different
+            # subtree on Windows would be incorrectly pruned. On POSIX
+            # ``normcase`` is identity.
+            target = os.path.normcase(target)
         normalized = []
         for pattern_type, pat in self.patterns:
             if src_type == 'local':
-                pat = pat.replace('/', os.sep)
+                pat = os.path.normcase(pat.replace('/', os.sep))
             else:
                 pat = pat.replace(os.sep, '/')
             normalized.append((pattern_type, pat))

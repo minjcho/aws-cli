@@ -11,7 +11,7 @@
 # ANY KIND, either express or implied. See the License for the specific
 # language governing permissions and limitations under the License.
 import os
-from awscli.testutils import unittest
+from awscli.testutils import mock, unittest
 import platform
 
 from awscli.customizations.s3.filegenerator import FileStat
@@ -414,6 +414,28 @@ class CanSkipDirectoryTest(unittest.TestCase):
         # so default is "must traverse". (Files there are default-include.)
         self.assertFalse(
             f.can_skip_directory(self._path_under('included')))
+
+    @mock.patch('awscli.customizations.s3.filters.os.path.normcase')
+    def test_can_skip_directory_is_case_insensitive_on_windows(
+            self, mock_normcase):
+        """fnmatch.fnmatch is case-insensitive on Windows via normcase.
+        can_skip_directory must apply the same normalization or it will
+        wrong-prune a case-different subtree that an include pattern
+        actually covers.
+        """
+        # Simulate Windows-style case-insensitive normalization.
+        mock_normcase.side_effect = (
+            lambda p: p.lower().replace('/', os.sep))
+        f = self._make_filter([
+            ('--exclude', '*'),
+            ('--include', 'SRC/important.txt'),
+        ])
+        # Real directory on disk uses lowercase 'src'. The include
+        # pattern is uppercase 'SRC'. Without case normalization,
+        # the prune logic would diverge on the first letter and
+        # incorrectly skip the subtree.
+        self.assertFalse(
+            f.can_skip_directory(self._path_under('src')))
 
 
 if __name__ == "__main__":

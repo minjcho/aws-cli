@@ -223,6 +223,31 @@ class _UploadFilterCases:
              'directory/mid.py',
              'top.py'])
 
+    @skip_if_windows('Symlink semantics differ on Windows.')
+    def test_broken_symlink_warning_survives_specific_exclude(self):
+        """A broken symlink encountered during walking must still produce
+        a 'does not exist' warning. The filter is for selecting which
+        transfers to perform, not for swallowing fs-level validation
+        errors.
+
+        Uses a name-specific exclude (rather than ``--exclude '*'``)
+        because ``*`` would prune the rootdir itself and the walker
+        would never reach the symlink. With a name-specific pattern,
+        the rootdir survives, the walker calls ``should_ignore_file``
+        on the broken link, and the existence-before-filter ordering
+        is what guarantees the warning surfaces.
+        """
+        # A real keep file so the rootdir is non-empty and not pruned.
+        self.files.create_file('keep.txt', 'data')
+        target = os.path.join(self.files.rootdir, 'no_such_target')
+        link = os.path.join(self.files.rootdir, 'broken_link')
+        os.symlink(target, link)
+
+        self.parsed_responses = self._list_dest() + [
+            self._put_object_response()]
+        _, stderr, _ = self._run("--exclude broken_link", expected_rc=2)
+        self.assertIn('does not exist', stderr)
+
     @skip_if_windows('Uses POSIX path realpath comparison.')
     def test_excluded_subtree_is_not_listdired(self):
         """Direct prune evidence for #1138.

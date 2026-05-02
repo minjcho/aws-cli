@@ -286,7 +286,19 @@ class FileGenerator(object):
                 path = path[:-1]
             if os.path.islink(path):
                 return True
-        if self.file_filter is not None:
+        # Only run the prefilter / existence-before-filter logic when the
+        # user actually supplied --include/--exclude patterns. With an
+        # empty filter, ``Filter.call`` cannot suppress anything anyway,
+        # so the extra os.path.exists() call here would be pure overhead
+        # on large unfiltered sync/cp/mv walks.
+        if self.file_filter is not None and self.file_filter.patterns:
+            # Validate existence *before* the filter has a chance to
+            # suppress the warning. A broken symlink or a path that
+            # disappeared between listdir and stat should still produce
+            # the standard "File does not exist." warning even when
+            # --exclude/--include would otherwise mask it.
+            if not os.path.exists(path):
+                return self.triggers_warning(path)
             # Pre-filter using the user's --include/--exclude rules so the
             # walker does not stat / listdir entries that the filter chain
             # is going to drop anyway.
