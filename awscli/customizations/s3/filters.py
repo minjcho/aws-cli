@@ -187,7 +187,8 @@ class Filter(object):
                         file_path, pattern_type, path_pattern)
         return file_status
 
-    def can_skip_directory(self, dir_path, src_type='local'):
+    def can_skip_directory(self, dir_path, src_type='local',
+                           use_dst_patterns=False):
         """Return True only when no descendant of ``dir_path`` can possibly
         be included by the filter chain.
 
@@ -196,11 +197,18 @@ class Filter(object):
         the caller may safely skip listing it. False is conservative
         (the directory must be traversed normally).
 
+        ``use_dst_patterns``: when True, evaluate against ``dst_patterns``
+        (rooted at the destination) instead of ``patterns`` (rooted at the
+        source). The reverse-direction file generator used during
+        ``s3 sync s3://bucket/ ./local`` walks the local destination, so
+        it must consult the destination-rooted patterns to prune correctly.
+
         See ``proposals/s3-filter-prune.md`` for the full algorithm
         and the regression-safety argument that handles cases like
         ``--exclude '*' --include '*.py'``.
         """
-        if not self.patterns:
+        patterns = self.dst_patterns if use_dst_patterns else self.patterns
+        if not patterns:
             return False
         sep = os.sep if src_type == 'local' else '/'
         target = dir_path.rstrip(sep) + sep
@@ -212,7 +220,7 @@ class Filter(object):
             # ``normcase`` is identity.
             target = os.path.normcase(target)
         normalized = []
-        for pattern_type, pat in self.patterns:
+        for pattern_type, pat in patterns:
             if src_type == 'local':
                 pat = os.path.normcase(pat.replace('/', os.sep))
             else:

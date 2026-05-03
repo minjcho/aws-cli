@@ -343,6 +343,31 @@ class TestSyncDownloadFilterTraverse(_BaseFilterTraverse):
         self._run("--exclude *", expected_rc=0)
         self.assertEqual(self._downloaded_keys(), [])
 
+    @skip_if_windows('POSIX-only directory mode test.')
+    def test_excluded_dest_subtree_with_unreadable_dir_does_not_warn(self):
+        """sync s3://b/ ./dst --exclude excluded/*: a 0o000 directory
+        sitting inside the excluded destination subtree must not be
+        listdired (and so must not produce a 'not readable' warning).
+
+        Without the dst-side prune, the reverse walker descends into
+        /dst/excluded because the source-rooted patterns don't match
+        the destination path; once inside, is_readable() on the 0o000
+        sub-dir fires triggers_warning() and the user gets rc=2 even
+        though they explicitly excluded the whole subtree.
+        """
+        self.files.create_file(
+            os.path.join('excluded', 'sub', 'inner.txt'), 'data')
+        sub_path = os.path.join(self.files.rootdir, 'excluded', 'sub')
+        os.chmod(sub_path, 0o000)
+        try:
+            self.parsed_responses = [self.list_objects_response([])]
+            _, stderr, _ = self._run(
+                "--only-show-errors --exclude excluded/*", expected_rc=0)
+            self.assertNotIn('excluded/sub', stderr)
+            self.assertNotIn('not readable', stderr)
+        finally:
+            os.chmod(sub_path, 0o755)
+
 
 class _CrossBucketCases:
     """Test methods reused by cp/mv/sync s3→s3.

@@ -415,6 +415,38 @@ class CanSkipDirectoryTest(unittest.TestCase):
         self.assertFalse(
             f.can_skip_directory(self._path_under('included')))
 
+    def test_can_skip_directory_uses_dst_patterns_when_requested(self):
+        """The reverse walker (sync s3://b/ ./dst) must be able to prune
+        destination subtrees by consulting ``dst_patterns`` instead of
+        the source-rooted ``patterns``.
+        """
+        src_root = platform_path('/src')
+        dst_root = platform_path('/dst')
+        f = Filter([('exclude', 'excluded/*')], src_root, dst_root)
+        # Same dir, but evaluated against different rootdirs.
+        # use_dst_patterns=True → matches /dst/excluded/* → prune.
+        self.assertTrue(
+            f.can_skip_directory(
+                os.path.join(dst_root, 'excluded'), 'local',
+                use_dst_patterns=True))
+        # use_dst_patterns=False → would compare against /src/excluded/*,
+        # which doesn't match a /dst/... path → no prune.
+        self.assertFalse(
+            f.can_skip_directory(
+                os.path.join(dst_root, 'excluded'), 'local',
+                use_dst_patterns=False))
+
+    def test_can_skip_directory_dst_patterns_empty_returns_false(self):
+        """When use_dst_patterns=True but dst_patterns is empty (e.g.
+        Filter constructed with dst_rootdir=None), prune predicate
+        falls through to False instead of erroring out.
+        """
+        f = Filter({}, None, None)
+        self.assertFalse(
+            f.can_skip_directory(
+                self._path_under('anything'), 'local',
+                use_dst_patterns=True))
+
     @mock.patch('awscli.customizations.s3.filters.os.path.normcase')
     def test_can_skip_directory_is_case_insensitive_on_windows(
             self, mock_normcase):

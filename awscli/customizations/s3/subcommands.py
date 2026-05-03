@@ -1164,6 +1164,11 @@ class CommandArchitecture(object):
             'page_size': self.parameters['page_size'],
             'result_queue': result_queue,
             'file_filter': file_filter,
+            # rgen always operates on the destination side. When that
+            # side is local (e.g. ``sync s3://b/ ./dst``), filter pruning
+            # must consult ``dst_patterns`` (rooted at the local dest)
+            # rather than the source-rooted ``patterns``.
+            'is_dst_walker': True,
         }
 
         fgen_request_parameters = \

@@ -121,7 +121,7 @@ class FileGenerator(object):
     """
     def __init__(self, client, operation_name, follow_symlinks=True,
                  page_size=None, result_queue=None, request_parameters=None,
-                 file_filter=None):
+                 file_filter=None, is_dst_walker=False):
         self._client = client
         self.operation_name = operation_name
         self.follow_symlinks = follow_symlinks
@@ -133,6 +133,11 @@ class FileGenerator(object):
         if request_parameters is not None:
             self.request_parameters = request_parameters
         self.file_filter = file_filter
+        # When True, this generator is the reverse/destination walker for
+        # ``sync``. Filter pruning consults ``dst_patterns`` instead of
+        # ``patterns`` because the paths it sees are rooted at the
+        # destination, not the source.
+        self.is_dst_walker = is_dst_walker
 
     def call(self, files):
         """
@@ -211,7 +216,8 @@ class FileGenerator(object):
                         # This is what fixes aws/aws-cli#1138.
                         if self.file_filter is not None and \
                                 self.file_filter.can_skip_directory(
-                                    file_path, 'local'):
+                                    file_path, 'local',
+                                    use_dst_patterns=self.is_dst_walker):
                             continue
                         # Anything in a directory will have a prefix of
                         # this current directory and will come before the
@@ -290,8 +296,18 @@ class FileGenerator(object):
         # user actually supplied --include/--exclude patterns. With an
         # empty filter, ``Filter.call`` cannot suppress anything anyway,
         # so the extra os.path.exists() call here would be pure overhead
-        # on large unfiltered sync/cp/mv walks.
-        if self.file_filter is not None and self.file_filter.patterns:
+        # on large unfiltered sync/cp/mv walks. The reverse walker uses
+        # destination-rooted patterns; pick the right set up front so an
+        # empty src-side filter on a dst-walking generator (or vice versa)
+        # also short-circuits correctly.
+        if self.file_filter is not None:
+            relevant_patterns = (
+                self.file_filter.dst_patterns
+                if self.is_dst_walker
+                else self.file_filter.patterns)
+        else:
+            relevant_patterns = None
+        if relevant_patterns:
             # Validate existence *before* the filter has a chance to
             # suppress the warning. A broken symlink or a path that
             # disappeared between listdir and stat should still produce
@@ -318,7 +334,9 @@ class FileGenerator(object):
             # only descendants matched by an exclude that covers everything
             # under them get pruned, never the rootdir itself.
             if os.path.isdir(path):
-                if self.file_filter.can_skip_directory(path, 'local'):
+                if self.file_filter.can_skip_directory(
+                        path, 'local',
+                        use_dst_patterns=self.is_dst_walker):
                     return True
             else:
                 probe = FileInfo(src=path, src_type='local')
